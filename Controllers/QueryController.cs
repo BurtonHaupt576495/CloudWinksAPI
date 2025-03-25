@@ -26,7 +26,7 @@ namespace CloudWinksServiceAPI.Controllers
         {
             if (request == null || request.AppId <= 0 || string.IsNullOrWhiteSpace(request.Name))
             {
-                return BadRequest(new { status = "error", message = "Invalid request data." });
+                return BadRequest("Invalid request data.");
             }
 
             try
@@ -66,10 +66,9 @@ namespace CloudWinksServiceAPI.Controllers
 
                         if (jsonResult is string jsonString)
                         {
-                            var deserializedData = JsonSerializer.Deserialize<List<object>>(jsonString);
-                            return Ok(new { status = "success", JasonResult = deserializedData ?? new List<object>() });
+                            return Ok(JsonSerializer.Deserialize<object>(jsonString)); // Pass through the raw JSON
                         }
-                        return Ok(new { status = "success", JasonResult = new List<object>() }); // Fallback empty list
+                        return Ok(new object[0]); // Fallback empty array
                     }
                 }
             }
@@ -77,7 +76,7 @@ namespace CloudWinksServiceAPI.Controllers
             {
                 Console.WriteLine($"Error: {ex.Message}");
                 Console.WriteLine($"Stack Trace: {ex.StackTrace}");
-                return StatusCode(500, new { status = "error", message = ex.Message });
+                return StatusCode(500, ex.Message);
             }
         }
 

@@ -4,7 +4,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using System.Collections.Generic;
-using System.Data; // Added this for CommandType
+using System.Data;
 
 namespace CloudWinksServiceAPI.Controllers
 {
@@ -44,7 +44,6 @@ namespace CloudWinksServiceAPI.Controllers
 
                     using (var command = connection.CreateCommand())
                     {
-                        // Use quoted function name to preserve case
                         command.CommandText = isStoredProcedure
                             ? $"SELECT dbo.\"{request.Name}\"()"
                             : $"SELECT * FROM {request.Name}";
@@ -62,17 +61,15 @@ namespace CloudWinksServiceAPI.Controllers
                             }
                         }
 
-                        // ExecuteScalar for single JSONB return value
                         var jsonResult = await command.ExecuteScalarAsync();
                         Console.WriteLine($"Raw JSON result: {jsonResult}");
 
                         if (jsonResult is string jsonString)
                         {
-                            // Deserialize JSON string to list and return directly under data
                             var deserializedData = JsonSerializer.Deserialize<List<object>>(jsonString);
-                            return Ok(new { status = "success", data = deserializedData ?? new List<object>() });
+                            return Ok(new { status = "success", JasonResult = deserializedData ?? new List<object>() });
                         }
-                        return Ok(new { status = "success", data = new List<object>() }); // Fallback empty list
+                        return Ok(new { status = "success", JasonResult = new List<object>() }); // Fallback empty list
                     }
                 }
             }
@@ -91,7 +88,7 @@ namespace CloudWinksServiceAPI.Controllers
             {
                 command.Parameters.AddWithValue("@name", name.ToLower());
                 var result = command.ExecuteScalar();
-                return result != null && (long)result > 0; // Null check for safety
+                return result != null && (long)result > 0;
             }
         }
 

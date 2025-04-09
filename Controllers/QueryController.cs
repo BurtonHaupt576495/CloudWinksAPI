@@ -29,9 +29,13 @@ namespace CloudWinksServiceAPI.Controllers
                 return BadRequest("Invalid request data.");
             }
 
+            Console.WriteLine("✅ Received GenericExecute request:");
+            Console.WriteLine($"AppId: {request.AppId}");
+            Console.WriteLine($"Name: {request.Name}");
+            Console.WriteLine($"Parameters: {JsonSerializer.Serialize(request.Parameters)}");
+
             try
             {
-                Console.WriteLine($"AppId: {request.AppId}, Name: {request.Name}");
                 string connectionString = _connectionManager.GetOrAddConnectionString(request.AppId);
                 Console.WriteLine($"Using Connection String: {connectionString}");
 
@@ -44,21 +48,62 @@ namespace CloudWinksServiceAPI.Controllers
 
                     using (var command = connection.CreateCommand())
                     {
-                        command.CommandText = isStoredProcedure
-                            ? $"SELECT dbo.\"{request.Name}\"()"
-                            : $"SELECT * FROM {request.Name}";
-                        command.CommandType = CommandType.Text;
-
-                        if (request.Parameters != null && request.Parameters.Any() && isStoredProcedure)
+                        if (isStoredProcedure)
                         {
-                            var paramString = string.Join(", ", request.Parameters.Select(p => $"@{p.Key}"));
-                            command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramString})";
-                            foreach (var param in request.Parameters)
+                            if (request.Parameters != null && request.Parameters.Any())
                             {
-                                var value = ConvertJsonElement(param.Value);
-                                Console.WriteLine($"Parameter {param.Key}: {value}");
-                                command.Parameters.AddWithValue(param.Key, value ?? DBNull.Value);
+                                // Check if any parameter value is a dictionary with "type" and "value" (PostgreSQL case)
+                                bool isPostgresFormat = request.Parameters.Any(p =>
+                                    p.Value is Dictionary<string, object> dict &&
+                                    dict.ContainsKey("type") && dict.ContainsKey("value"));
+
+                                if (isPostgresFormat)
+                                {
+                                    // PostgreSQL case (valuePairs = false)
+                                    var paramList = new List<string>();
+                                    int paramIndex = 1;
+                                    foreach (var param in request.Parameters)
+                                    {
+                                        var paramData = param.Value as Dictionary<string, object>;
+                                        if (paramData != null && paramData.ContainsKey("type") && paramData.ContainsKey("value"))
+                                        {
+                                            string paramType = paramData["type"]?.ToString() ?? "text";
+                                            var paramValue = ConvertJsonElement(paramData["value"]);
+                                            paramList.Add($"${paramIndex}::{paramType}");
+                                            Console.WriteLine($"Parameter {param.Key}: Type={paramType}, Value={paramValue}");
+                                            command.Parameters.AddWithValue("", paramValue ?? DBNull.Value);
+                                            paramIndex++;
+                                        }
+                                    }
+                                    command.CommandText = $"SELECT dbo.\"{request.Name}\"({string.Join(", ", paramList)})";
+                                    command.CommandType = CommandType.Text;
+                                }
+                                else
+                                {
+                                    // MSSQL case (valuePairs = true)
+                                    var paramString = string.Join(", ", request.Parameters.Select(p => $"@{p.Key}"));
+                                    command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramString})";
+                                    command.CommandType = CommandType.Text;
+
+                                    foreach (var param in request.Parameters)
+                                    {
+                                        var value = ConvertJsonElement(param.Value);
+                                        Console.WriteLine($"Parameter {param.Key}: {value}");
+                                        command.Parameters.AddWithValue(param.Key, value ?? DBNull.Value);
+                                    }
+                                }
                             }
+                            else
+                            {
+                                command.CommandText = $"SELECT dbo.\"{request.Name}\"()";
+                                command.CommandType = CommandType.Text;
+                            }
+                        }
+                        else
+                        {
+                            // Handle table/view query (unchanged)
+                            command.CommandText = $"SELECT * FROM {request.Name}";
+                            command.CommandType = CommandType.Text;
                         }
 
                         var jsonResult = await command.ExecuteScalarAsync();
@@ -66,9 +111,9 @@ namespace CloudWinksServiceAPI.Controllers
 
                         if (jsonResult is string jsonString)
                         {
-                            return Ok(JsonSerializer.Deserialize<object>(jsonString)); // Pass through the raw JSON
+                            return Ok(JsonSerializer.Deserialize<object>(jsonString));
                         }
-                        return Ok(new object[0]); // Fallback empty array
+                        return Ok(new object[0]);
                     }
                 }
             }

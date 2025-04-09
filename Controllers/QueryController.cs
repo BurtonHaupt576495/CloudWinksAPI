@@ -50,11 +50,19 @@ namespace CloudWinksServiceAPI.Controllers
                     {
                         if (isStoredProcedure)
                         {
-                            command.CommandType = CommandType.StoredProcedure;
-                            command.CommandText = $"dbo.{request.Name}";
-
-                            if (request.Parameters != null && request.Parameters.Any())
+                            if (connection is NpgsqlConnection)
                             {
+                                // PostgreSQL: Use SELECT to call stored function
+                                var paramPlaceholders = new List<string>();
+                                for (int i = 0; i < request.Parameters.Count; i++)
+                                {
+                                    paramPlaceholders.Add($"${i + 1}");
+                                }
+
+                                string paramList = string.Join(", ", paramPlaceholders);
+                                command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramList})";
+                                command.CommandType = CommandType.Text;
+
                                 for (int i = 0; i < request.Parameters.Count; i++)
                                 {
                                     var param = request.Parameters[i];
@@ -62,7 +70,6 @@ namespace CloudWinksServiceAPI.Controllers
 
                                     var npgParam = new NpgsqlParameter
                                     {
-                                        ParameterName = $"p{i + 1}", // Positional parameter naming
                                         Value = paramValue ?? DBNull.Value
                                     };
 
@@ -70,6 +77,27 @@ namespace CloudWinksServiceAPI.Controllers
                                     command.Parameters.Add(npgParam);
 
                                     Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
+                                }
+                            }
+                            else
+                            {
+                                // MSSQL-style stored procedure
+                                command.CommandType = CommandType.StoredProcedure;
+                                command.CommandText = $"dbo.{request.Name}";
+
+                                for (int i = 0; i < request.Parameters.Count; i++)
+                                {
+                                    var param = request.Parameters[i];
+                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
+
+                                    var dbParam = new NpgsqlParameter
+                                    {
+                                        ParameterName = $"p{i + 1}",
+                                        Value = paramValue ?? DBNull.Value
+                                    };
+
+                                    SetNpgsqlDbType(dbParam, param.Type);
+                                    command.Parameters.Add(dbParam);
                                 }
                             }
                         }
@@ -81,24 +109,17 @@ namespace CloudWinksServiceAPI.Controllers
 
                         object jsonResult;
 
-                        if (command.CommandType == CommandType.StoredProcedure)
+                        using (var reader = await command.ExecuteReaderAsync())
                         {
-                            using (var reader = await command.ExecuteReaderAsync())
+                            if (reader.HasRows)
                             {
-                                if (reader.HasRows)
-                                {
-                                    await reader.ReadAsync();
-                                    jsonResult = reader.GetValue(0);
-                                }
-                                else
-                                {
-                                    return Ok(new object[0]);
-                                }
+                                await reader.ReadAsync();
+                                jsonResult = reader.GetValue(0);
                             }
-                        }
-                        else
-                        {
-                            jsonResult = await command.ExecuteScalarAsync();
+                            else
+                            {
+                                return Ok(new object[0]);
+                            }
                         }
 
                         Console.WriteLine($"Raw JSON result: {jsonResult}");
@@ -118,6 +139,7 @@ namespace CloudWinksServiceAPI.Controllers
                 return StatusCode(500, ex.Message);
             }
         }
+
 
         private bool IsStoredProcedure(string name, NpgsqlConnection connection)
         {

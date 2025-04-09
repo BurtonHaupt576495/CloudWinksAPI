@@ -62,18 +62,20 @@ namespace CloudWinksServiceAPI.Controllers
                                 foreach (var param in request.Parameters)
                                 {
                                     var paramData = param.Value as Dictionary<string, object>;
-                                    if (paramData != null && paramData.ContainsKey("type") && paramData.ContainsKey("value"))
+                                    if (paramData != null)
                                     {
                                         string paramType = paramData["type"]?.ToString() ?? "text";
                                         var paramValue = ConvertJsonElement(paramData["value"], paramType);
-                                        parameters.Add($"p{++position}", paramValue ?? DBNull.Value);
-                                        Console.WriteLine($"Parameter {param.Key}: Type={paramType}, Value={paramValue}");
-                                    }
-                                    else
-                                    {
-                                        return BadRequest($"Invalid parameter format for {param.Key}: Expected 'type' and 'value' keys.");
+                                        parameters.Add($"p{++position}", paramValue);
                                     }
                                 }
+
+                                var result = await connection.QuerySingleOrDefaultAsync<string>(
+                                    $"SELECT dbo.\"{request.Name}\"({string.Join(", ", Enumerable.Range(1, parameters.ParameterNames.Count()).Select(i => $"@p{i}"))})");
+
+                                return Ok(JsonSerializer.Deserialize<object>(result));
+                            }
+                        }
 
                                 string query = $"SELECT dbo.\"{request.Name}\"({string.Join(", ", Enumerable.Range(1, parameters.ParameterNames.Count()).Select(i => $"@p{i}"))})";
                                 var result = await connection.QuerySingleOrDefaultAsync<string>(query, parameters);

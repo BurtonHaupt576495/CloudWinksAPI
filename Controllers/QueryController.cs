@@ -1,11 +1,10 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using System.Collections.Generic;
-using Dapper;
-using System.Linq;
+using System.Data;
 
 namespace CloudWinksServiceAPI.Controllers
 {
@@ -45,94 +44,121 @@ namespace CloudWinksServiceAPI.Controllers
                     await connection.OpenAsync();
                     Console.WriteLine("Connection opened successfully.");
 
-                    var isStoredProcedure = await IsStoredProcedure(request.Name, connection);
+                    var isStoredProcedure = IsStoredProcedure(request.Name, connection);
 
-                    if (isStoredProcedure)
+                    using (var command = connection.CreateCommand())
                     {
-                        if (request.Parameters != null && request.Parameters.Any())
+                        if (isStoredProcedure)
                         {
-                            bool isPostgresFormat = request.Parameters.Any(p =>
-                                p.Value is Dictionary<string, object> dict &&
-                                dict.ContainsKey("type") && dict.ContainsKey("value"));
-
-                            if (isPostgresFormat)
+                            // For PostgreSQL, we use a simple function call without type casts in the SQL
+                            if (request.Parameters != null && request.Parameters.Any())
                             {
-                                var parameters = new DynamicParameters();
-                                int position = 0;
-                                foreach (var param in request.Parameters)
+                                // Check if any parameter value is a dictionary with "type" and "value" (PostgreSQL case)
+                                bool isPostgresFormat = request.Parameters.Any(p =>
+                                    p.Value is Dictionary<string, object> dict &&
+                                    dict.ContainsKey("type") && dict.ContainsKey("value"));
+
+                                if (isPostgresFormat)
                                 {
-                                    var paramData = param.Value as Dictionary<string, object>;
-                                    if (paramData != null)
+                                    // Create parameter placeholders without type casting
+                                    var paramPlaceholders = new List<string>();
+
+                                    // Set command type to StoredProcedure for PostgreSQL functions
+                                    command.CommandType = CommandType.StoredProcedure;
+                                    command.CommandText = $"dbo.{request.Name}"; // Use schema.function_name format
+
+                                    // Add parameters in order
+                                    int paramIndex = 0;
+                                    foreach (var param in request.Parameters)
                                     {
-                                        string paramType = paramData["type"]?.ToString() ?? "text";
-                                        var paramValue = ConvertJsonElement(paramData["value"], paramType);
-                                        parameters.Add($"p{++position}", paramValue);
+                                        var paramData = param.Value as Dictionary<string, object>;
+                                        if (paramData != null && paramData.ContainsKey("type") && paramData.ContainsKey("value"))
+                                        {
+                                            string paramType = paramData["type"]?.ToString() ?? "text";
+                                            var paramValue = ConvertJsonElement(paramData["value"], paramType);
+
+                                            // Create proper NpgsqlParameter with NpgsqlDbType if possible
+                                            var npgParam = new NpgsqlParameter
+                                            {
+                                                ParameterName = $"p{paramIndex}", // Use positional name
+                                                Value = paramValue ?? DBNull.Value
+                                            };
+
+                                            // Set the appropriate NpgsqlDbType if needed
+                                            SetNpgsqlDbType(npgParam, paramType);
+
+                                            Console.WriteLine($"Parameter {paramIndex}: Type={paramType}, Value={paramValue}");
+                                            command.Parameters.Add(npgParam);
+                                            paramIndex++;
+                                        }
+                                        else
+                                        {
+                                            return BadRequest($"Invalid parameter format for {param.Key}: Expected 'type' and 'value' keys.");
+                                        }
                                     }
                                 }
-
-                                var result = await connection.QuerySingleOrDefaultAsync<string>(
-                                    $"SELECT dbo.\"{request.Name}\"({string.Join(", ", Enumerable.Range(1, parameters.ParameterNames.Count()).Select(i => $"@p{i}"))})");
-
-                                return Ok(JsonSerializer.Deserialize<object>(result));
-                            }
-                        }
-
-                                string query = $"SELECT dbo.\"{request.Name}\"({string.Join(", ", Enumerable.Range(1, parameters.ParameterNames.Count()).Select(i => $"@p{i}"))})";
-                                var result = await connection.QuerySingleOrDefaultAsync<string>(query, parameters);
-                                Console.WriteLine($"Raw JSON result: {result}");
-
-                                if (string.IsNullOrEmpty(result))
+                                else
                                 {
-                                    return Ok(new object[0]);
+                                    // MSSQL case (valuePairs = true)
+                                    var paramString = string.Join(", ", request.Parameters.Select(p => $"@{p.Key}"));
+                                    command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramString})";
+                                    command.CommandType = CommandType.Text;
+
+                                    foreach (var param in request.Parameters)
+                                    {
+                                        var value = ConvertJsonElement(param.Value, null); // No type for MSSQL case
+                                        Console.WriteLine($"Parameter {param.Key}: {value}");
+                                        command.Parameters.AddWithValue(param.Key, value ?? DBNull.Value);
+                                    }
                                 }
-                                return Ok(JsonSerializer.Deserialize<object>(result));
                             }
                             else
                             {
-                                // MSSQL case
-                                var paramString = string.Join(", ", request.Parameters.Select(p => $"@{p.Key}"));
-                                var parameters = new DynamicParameters();
-                                foreach (var param in request.Parameters)
-                                {
-                                    var value = ConvertJsonElement(param.Value, null);
-                                    Console.WriteLine($"Parameter {param.Key}: {value}");
-                                    parameters.Add(param.Key, value ?? DBNull.Value);
-                                }
-                                string query = $"SELECT dbo.\"{request.Name}\"({paramString})";
-                                var jsonResult = await connection.ExecuteScalarAsync<string>(query, parameters);
-                                Console.WriteLine($"Raw JSON result: {jsonResult}");
-
-                                if (!string.IsNullOrEmpty(jsonResult))
-                                {
-                                    return Ok(JsonSerializer.Deserialize<object>(jsonResult));
-                                }
-                                return Ok(new object[0]);
+                                // No parameters case
+                                command.CommandType = CommandType.StoredProcedure;
+                                command.CommandText = $"dbo.{request.Name}";
                             }
                         }
                         else
                         {
-                            string query = $"SELECT dbo.\"{request.Name}\"()";
-                            var jsonResult = await connection.ExecuteScalarAsync<string>(query);
-                            Console.WriteLine($"Raw JSON result: {jsonResult}");
-
-                            if (!string.IsNullOrEmpty(jsonResult))
-                            {
-                                return Ok(JsonSerializer.Deserialize<object>(jsonResult));
-                            }
-                            return Ok(new object[0]);
+                            command.CommandText = $"SELECT * FROM {request.Name}";
+                            command.CommandType = CommandType.Text;
                         }
-                    }
-                    else
-                    {
-                        string query = $"SELECT * FROM {request.Name}";
-                        var jsonResult = await connection.ExecuteScalarAsync<string>(query);
+
+                        // For PostgreSQL functions, we might need to use a data reader instead of ExecuteScalar
+                        // if the function returns a result set
+                        object jsonResult;
+
+                        if (command.CommandType == CommandType.StoredProcedure)
+                        {
+                            // Handle PostgreSQL function results
+                            using (var reader = await command.ExecuteReaderAsync())
+                            {
+                                if (reader.HasRows)
+                                {
+                                    await reader.ReadAsync();
+                                    jsonResult = reader.GetValue(0);
+                                }
+                                else
+                                {
+                                    // Function executed but returned no results
+                                    return Ok(new object[0]);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // For non-stored procedures or MSSQL style
+                            jsonResult = await command.ExecuteScalarAsync();
+                        }
+
                         Console.WriteLine($"Raw JSON result: {jsonResult}");
 
-                        if (!string.IsNullOrEmpty(jsonResult))
+                        if (jsonResult is string jsonString)
                         {
-                            return Ok(JsonSerializer.Deserialize<object>(jsonResult));
+                            return Ok(JsonSerializer.Deserialize<object>(jsonString));
                         }
-                        return Ok(new object[0]);
+                        return Ok(jsonResult ?? new object[0]);
                     }
                 }
             }
@@ -144,17 +170,61 @@ namespace CloudWinksServiceAPI.Controllers
             }
         }
 
-        private async Task<bool> IsStoredProcedure(string name, NpgsqlConnection connection)
+        private bool IsStoredProcedure(string name, NpgsqlConnection connection)
         {
             var query = "SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'dbo' AND p.proname = LOWER(@name)";
-            var count = await connection.ExecuteScalarAsync<long>(query, new { name = name.ToLower() });
-            return count > 0;
+            using (var command = new NpgsqlCommand(query, connection))
+            {
+                command.Parameters.AddWithValue("@name", name.ToLower());
+                var result = command.ExecuteScalar();
+                return result != null && (long)result > 0;
+            }
+        }
+
+        private void SetNpgsqlDbType(NpgsqlParameter parameter, string postgresType)
+        {
+            // Map PostgreSQL type names to NpgsqlDbType
+            switch (postgresType.ToLower())
+            {
+                case "integer":
+                case "int":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer;
+                    break;
+                case "text":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text;
+                    break;
+                case "varchar":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Varchar;
+                    break;
+                case "boolean":
+                case "bool":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean;
+                    break;
+                case "double precision":
+                case "float":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double;
+                    break;
+                case "timestamp with time zone":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz;
+                    break;
+                case "bytea":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea;
+                    break;
+                case "smallint":
+                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint;
+                    break;
+                // Add more mappings as needed
+                default:
+                    // For unknown types, let Npgsql try to infer the type
+                    break;
+            }
         }
 
         private object? ConvertJsonElement(object? value, string? postgresType)
         {
             if (value is JsonElement jsonElement)
             {
+                // If no postgresType is provided (e.g., MSSQL case), fall back to ValueKind-based conversion
                 if (string.IsNullOrEmpty(postgresType))
                 {
                     switch (jsonElement.ValueKind)
@@ -171,6 +241,7 @@ namespace CloudWinksServiceAPI.Controllers
                     }
                 }
 
+                // PostgreSQL case: use the provided type to guide conversion
                 switch (postgresType.ToLower())
                 {
                     case "integer":
@@ -184,7 +255,7 @@ namespace CloudWinksServiceAPI.Controllers
                     case "varchar":
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.String) return jsonElement.GetString();
-                        return jsonElement.ToString();
+                        return jsonElement.ToString(); // Fallback: convert numbers, booleans, etc. to string
 
                     case "boolean":
                     case "bool":
@@ -201,11 +272,22 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.String && double.TryParse(jsonElement.GetString(), out double parsedDouble)) return parsedDouble;
                         throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to double for value: {jsonElement}");
 
+                    case "bytea":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            // Assuming base64 encoded string for bytea
+                            string? base64 = jsonElement.GetString();
+                            return string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
+                        }
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bytea for value: {jsonElement}");
+
+                    // Add more PostgreSQL types as needed
                     default:
                         throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");
                 }
             }
-            return value;
+            return value; // Non-JsonElement values passed through (e.g., null)
         }
 
         public class ExecuteRequest

@@ -50,85 +50,79 @@ namespace CloudWinksServiceAPI.Controllers
                     {
                         if (isStoredProcedure)
                         {
-                            if (connection is NpgsqlConnection)
+                            command.CommandType = CommandType.Text;
+                            var orderedParams = request.Parameters.ToList();
+
+                            var paramPlaceholders = new List<string>();
+                            for (int i = 0; i < orderedParams.Count; i++)
                             {
-                                // PostgreSQL: Use SELECT to call stored function
-                                var paramPlaceholders = new List<string>();
-                                for (int i = 0; i < request.Parameters.Count; i++)
-                                {
-                                    paramPlaceholders.Add($"${i + 1}");
-                                }
-
-                                string paramList = string.Join(", ", paramPlaceholders);
-                                command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramList})";
-                                command.CommandType = CommandType.Text;
-
-                                for (int i = 0; i < request.Parameters.Count; i++)
-                                {
-                                    var param = request.Parameters[i];
-                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
-
-                                    var npgParam = new NpgsqlParameter
-                                    {
-                                        Value = paramValue ?? DBNull.Value
-                                    };
-
-                                    SetNpgsqlDbType(npgParam, param.Type);
-                                    command.Parameters.Add(npgParam);
-
-                                    Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
-                                }
+                                paramPlaceholders.Add($"${i + 1}");
                             }
-                            else
+
+                            string paramList = string.Join(", ", paramPlaceholders);
+                            command.CommandText = $"SELECT * FROM dbo.\"{request.Name}\"({paramList})";
+
+                            for (int i = 0; i < orderedParams.Count; i++)
                             {
-                                // MSSQL-style stored procedure
-                                command.CommandType = CommandType.StoredProcedure;
-                                command.CommandText = $"dbo.{request.Name}";
+                                var param = orderedParams[i];
+                                var paramValue = ConvertJsonElement(param.Value, param.Type);
 
-                                for (int i = 0; i < request.Parameters.Count; i++)
+                                var npgParam = new NpgsqlParameter
                                 {
-                                    var param = request.Parameters[i];
-                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
+                                    Value = paramValue ?? DBNull.Value
+                                };
+                                SetNpgsqlDbType(npgParam, param.Type);
+                                command.Parameters.Add(npgParam);
 
-                                    var dbParam = new NpgsqlParameter
+                                Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
+                            }
+
+                            using (var reader = await command.ExecuteReaderAsync())
+                            {
+                                var resultList = new List<object>();
+                                while (await reader.ReadAsync())
+                                {
+                                    if (reader.GetFieldType(0) == typeof(string) && reader.GetString(0).StartsWith("{"))
                                     {
-                                        ParameterName = $"p{i + 1}",
-                                        Value = paramValue ?? DBNull.Value
-                                    };
-
-                                    SetNpgsqlDbType(dbParam, param.Type);
-                                    command.Parameters.Add(dbParam);
+                                        return Ok(JsonSerializer.Deserialize<object>(reader.GetString(0)));
+                                    }
+                                    else
+                                    {
+                                        var rowDict = new Dictionary<string, object>();
+                                        for (int i = 0; i < reader.FieldCount; i++)
+                                        {
+                                            if (!reader.IsDBNull(i))
+                                            {
+                                                rowDict[reader.GetName(i)] = reader.GetValue(i);
+                                            }
+                                        }
+                                        resultList.Add(rowDict);
+                                    }
                                 }
+                                return Ok(resultList);
                             }
                         }
                         else
                         {
                             command.CommandText = $"SELECT * FROM {request.Name}";
                             command.CommandType = CommandType.Text;
-                        }
 
-                        object jsonResult;
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            if (reader.HasRows)
+                            using (var reader = await command.ExecuteReaderAsync())
                             {
-                                await reader.ReadAsync();
-                                jsonResult = reader.GetValue(0);
-                            }
-                            else
-                            {
+                                if (reader.HasRows)
+                                {
+                                    await reader.ReadAsync();
+                                    var jsonResult = reader.GetValue(0);
+                                    Console.WriteLine($"Raw JSON result: {jsonResult}");
+                                    if (jsonResult is string jsonString)
+                                    {
+                                        return Ok(JsonSerializer.Deserialize<object>(jsonString));
+                                    }
+                                    return Ok(jsonResult ?? new object[0]);
+                                }
                                 return Ok(new object[0]);
                             }
                         }
-
-                        Console.WriteLine($"Raw JSON result: {jsonResult}");
-
-                        if (jsonResult is string jsonString)
-                        {
-                            return Ok(JsonSerializer.Deserialize<object>(jsonString));
-                        }
-                        return Ok(jsonResult ?? new object[0]);
                     }
                 }
             }
@@ -139,7 +133,6 @@ namespace CloudWinksServiceAPI.Controllers
                 return StatusCode(500, ex.Message);
             }
         }
-
 
         private bool IsStoredProcedure(string name, NpgsqlConnection connection)
         {
@@ -157,34 +150,26 @@ namespace CloudWinksServiceAPI.Controllers
             switch (postgresType.ToLower())
             {
                 case "integer":
-                case "int":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer;
-                    break;
-                case "text":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text;
-                    break;
-                case "varchar":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Varchar;
-                    break;
-                case "boolean":
-                case "bool":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean;
-                    break;
+                case "int": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer; break;
+                case "smallint": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint; break;
+                case "bigint": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint; break;
+                case "numeric": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Numeric; break;
+                case "real": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Real; break;
                 case "double precision":
-                case "float":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double;
-                    break;
-                case "timestamp with time zone":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz;
-                    break;
-                case "bytea":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea;
-                    break;
-                case "smallint":
-                    parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint;
-                    break;
-                default:
-                    break; // Let Npgsql infer the type for unknown cases
+                case "float": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double; break;
+                case "boolean":
+                case "bool": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean; break;
+                case "text": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text; break;
+                case "varchar": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Varchar; break;
+                case "char": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Char; break;
+                case "timestamp": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp; break;
+                case "timestamp with time zone": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz; break;
+                case "date": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date; break;
+                case "uuid": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Uuid; break;
+                case "json": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Json; break;
+                case "jsonb": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb; break;
+                case "bytea": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea; break;
+                default: break; // Let Npgsql infer
             }
         }
 
@@ -198,8 +183,8 @@ namespace CloudWinksServiceAPI.Controllers
                     {
                         case JsonValueKind.String: return jsonElement.GetString() ?? string.Empty;
                         case JsonValueKind.Number:
-                            if (jsonElement.TryGetInt32(out int intValue)) return intValue;
-                            if (jsonElement.TryGetDouble(out double doubleValue)) return doubleValue;
+                            if (jsonElement.TryGetInt32(out int i)) return i;
+                            if (jsonElement.TryGetDouble(out double d)) return d;
                             return jsonElement.GetDecimal();
                         case JsonValueKind.True: return true;
                         case JsonValueKind.False: return false;
@@ -215,40 +200,32 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt32(out int intValue)) return intValue;
                         if (jsonElement.ValueKind == JsonValueKind.String && int.TryParse(jsonElement.GetString(), out int parsedInt)) return parsedInt;
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to integer for value: {jsonElement}");
-
+                        throw new InvalidOperationException($"Cannot convert to integer: {jsonElement}");
                     case "text":
                     case "varchar":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String) return jsonElement.GetString();
-                        return jsonElement.ToString();
-
+                        return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetString();
                     case "boolean":
                     case "bool":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.True) return true;
-                        if (jsonElement.ValueKind == JsonValueKind.False) return false;
-                        if (jsonElement.ValueKind == JsonValueKind.String && bool.TryParse(jsonElement.GetString(), out bool boolValue)) return boolValue;
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to boolean for value: {jsonElement}");
-
+                        return jsonElement.ValueKind switch
+                        {
+                            JsonValueKind.True => true,
+                            JsonValueKind.False => false,
+                            JsonValueKind.String => bool.TryParse(jsonElement.GetString(), out bool b) ? b : throw new InvalidOperationException(),
+                            JsonValueKind.Null => null,
+                            _ => throw new InvalidOperationException()
+                        };
                     case "double precision":
                     case "float":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetDouble(out double doubleValue)) return doubleValue;
-                        if (jsonElement.ValueKind == JsonValueKind.String && double.TryParse(jsonElement.GetString(), out double parsedDouble)) return parsedDouble;
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to double for value: {jsonElement}");
-
+                        return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDouble();
                     case "bytea":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.String)
                         {
                             string? base64 = jsonElement.GetString();
                             return string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
                         }
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bytea for value: {jsonElement}");
-
+                        throw new InvalidOperationException("Cannot convert to bytea");
                     default:
-                        throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");
+                        return jsonElement.ToString();
                 }
             }
             return value;
@@ -265,7 +242,7 @@ namespace CloudWinksServiceAPI.Controllers
         {
             public int AppId { get; set; }
             public string Name { get; set; } = string.Empty;
-            public List<ParameterInfo> Parameters { get; set; } = new List<ParameterInfo>();
+            public List<ParameterInfo> Parameters { get; set; } = new();
         }
     }
 }

@@ -230,6 +230,19 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.String && int.TryParse(jsonElement.GetString(), out int parsedInt)) return parsedInt;
                         throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to integer for value: {jsonElement}");
 
+                    case "bigint":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt64(out long longValue)) return longValue;
+                        if (jsonElement.ValueKind == JsonValueKind.String && long.TryParse(jsonElement.GetString(), out long parsedLong)) return parsedLong;
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bigint for value: {jsonElement}");
+
+                    case "numeric":
+                    case "decimal":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetDecimal(out decimal decValue)) return decValue;
+                        if (jsonElement.ValueKind == JsonValueKind.String && decimal.TryParse(jsonElement.GetString(), out decimal parsedDec)) return parsedDec;
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to numeric/decimal for value: {jsonElement}");
+
                     case "text":
                     case "varchar":
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
@@ -256,9 +269,84 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.String)
                         {
                             string? base64 = jsonElement.GetString();
-                            return string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
+                            if (string.IsNullOrEmpty(base64)) return null;
+                            try
+                            {
+                                return Convert.FromBase64String(base64);
+                            }
+                            catch (FormatException ex)
+                            {
+                                throw new InvalidOperationException($"Invalid base64 string for bytea: {base64}", ex);
+                            }
                         }
                         throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bytea for value: {jsonElement}");
+
+                    case "timestamp with time zone":
+                    case "timestamptz":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            string? timestamp = jsonElement.GetString();
+                            if (string.IsNullOrEmpty(timestamp)) return null;
+                            if (DateTime.TryParse(timestamp, out DateTime dt))
+                            {
+                                return dt;
+                            }
+                            throw new InvalidOperationException($"Cannot parse {timestamp} as timestamp with time zone");
+                        }
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to timestamptz for value: {jsonElement}");
+
+                    case "timestamp":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            string? timestamp = jsonElement.GetString();
+                            if (string.IsNullOrEmpty(timestamp)) return null;
+                            if (DateTime.TryParse(timestamp, out DateTime dt))
+                            {
+                                return dt;
+                            }
+                            throw new InvalidOperationException($"Cannot parse {timestamp} as timestamp");
+                        }
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to timestamp for value: {jsonElement}");
+
+                    case "date":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            string? dateStr = jsonElement.GetString();
+                            if (string.IsNullOrEmpty(dateStr)) return null;
+                            if (DateTime.TryParse(dateStr, out DateTime dt))
+                            {
+                                return dt.Date;
+                            }
+                            throw new InvalidOperationException($"Cannot parse {dateStr} as date");
+                        }
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to date for value: {jsonElement}");
+
+                    case "json":
+                    case "jsonb":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            string? jsonStr = jsonElement.GetString();
+                            return jsonStr; // Return as string, PostgreSQL will handle parsing
+                        }
+                        return JsonSerializer.Serialize(jsonElement); // Convert entire element to JSON string
+
+                    case "uuid":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String)
+                        {
+                            string? uuidStr = jsonElement.GetString();
+                            if (string.IsNullOrEmpty(uuidStr)) return null;
+                            if (Guid.TryParse(uuidStr, out Guid guid))
+                            {
+                                return guid;
+                            }
+                            throw new InvalidOperationException($"Cannot parse {uuidStr} as UUID");
+                        }
+                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to uuid for value: {jsonElement}");
 
                     default:
                         throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");

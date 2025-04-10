@@ -50,70 +50,54 @@ namespace CloudWinksServiceAPI.Controllers
                     {
                         if (isStoredProcedure)
                         {
-                            // For PostgreSQL functions
-                            command.CommandType = CommandType.Text;
-
-                            // Sort parameters by sequence if needed
-                            var orderedParams = request.Parameters.ToList();
-
-                            var paramPlaceholders = new List<string>();
-                            for (int i = 0; i < orderedParams.Count; i++)
+                            if (connection is NpgsqlConnection)
                             {
-                                paramPlaceholders.Add($"${i + 1}");
-                            }
-
-                            string paramList = string.Join(", ", paramPlaceholders);
-
-                            // The key change: Use proper SQL syntax for function calls
-                            command.CommandText = $"SELECT * FROM dbo.\"{request.Name}\"({paramList})";
-
-                            // Add parameters
-                            for (int i = 0; i < orderedParams.Count; i++)
-                            {
-                                var param = orderedParams[i];
-                                var paramValue = ConvertJsonElement(param.Value, param.Type);
-
-                                var npgParam = new NpgsqlParameter();
-                                npgParam.Value = paramValue ?? DBNull.Value;
-                                SetNpgsqlDbType(npgParam, param.Type);
-                                command.Parameters.Add(npgParam);
-
-                                Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
-                            }
-
-                            // Process results for functions that may return multiple rows
-                            using (var reader = await command.ExecuteReaderAsync())
-                            {
-                                if (reader.HasRows)
+                                // PostgreSQL: Use SELECT to call stored function
+                                var paramPlaceholders = new List<string>();
+                                for (int i = 0; i < request.Parameters.Count; i++)
                                 {
-                                    var resultList = new List<object>();
-                                    while (await reader.ReadAsync())
-                                    {
-                                        // Check if first column is JSON
-                                        if (reader.GetFieldType(0) == typeof(string) && reader.GetString(0).StartsWith("{"))
-                                        {
-                                            // Direct JSON return
-                                            return Ok(JsonSerializer.Deserialize<object>(reader.GetString(0)));
-                                        }
-                                        else
-                                        {
-                                            // Create a dictionary for this row
-                                            var rowDict = new Dictionary<string, object>();
-                                            for (int i = 0; i < reader.FieldCount; i++)
-                                            {
-                                                if (!reader.IsDBNull(i))
-                                                {
-                                                    rowDict[reader.GetName(i)] = reader.GetValue(i);
-                                                }
-                                            }
-                                            resultList.Add(rowDict);
-                                        }
-                                    }
-                                    return Ok(resultList);
+                                    paramPlaceholders.Add($"${i + 1}");
                                 }
-                                else
+
+                                string paramList = string.Join(", ", paramPlaceholders);
+                                command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramList})";
+                                command.CommandType = CommandType.Text;
+
+                                for (int i = 0; i < request.Parameters.Count; i++)
                                 {
-                                    return Ok(new object[0]);
+                                    var param = request.Parameters[i];
+                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
+
+                                    var npgParam = new NpgsqlParameter
+                                    {
+                                        Value = paramValue ?? DBNull.Value
+                                    };
+
+                                    SetNpgsqlDbType(npgParam, param.Type);
+                                    command.Parameters.Add(npgParam);
+
+                                    Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
+                                }
+                            }
+                            else
+                            {
+                                // MSSQL-style stored procedure
+                                command.CommandType = CommandType.StoredProcedure;
+                                command.CommandText = $"dbo.{request.Name}";
+
+                                for (int i = 0; i < request.Parameters.Count; i++)
+                                {
+                                    var param = request.Parameters[i];
+                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
+
+                                    var dbParam = new NpgsqlParameter
+                                    {
+                                        ParameterName = $"p{i + 1}",
+                                        Value = paramValue ?? DBNull.Value
+                                    };
+
+                                    SetNpgsqlDbType(dbParam, param.Type);
+                                    command.Parameters.Add(dbParam);
                                 }
                             }
                         }
@@ -121,28 +105,30 @@ namespace CloudWinksServiceAPI.Controllers
                         {
                             command.CommandText = $"SELECT * FROM {request.Name}";
                             command.CommandType = CommandType.Text;
-
-                            object jsonResult;
-                            using (var reader = await command.ExecuteReaderAsync())
-                            {
-                                if (reader.HasRows)
-                                {
-                                    await reader.ReadAsync();
-                                    jsonResult = reader.GetValue(0);
-                                }
-                                else
-                                {
-                                    return Ok(new object[0]);
-                                }
-                            }
-
-                            Console.WriteLine($"Raw JSON result: {jsonResult}");
-                            if (jsonResult is string jsonString)
-                            {
-                                return Ok(JsonSerializer.Deserialize<object>(jsonString));
-                            }
-                            return Ok(jsonResult ?? new object[0]);
                         }
+
+                        object jsonResult;
+
+                        using (var reader = await command.ExecuteReaderAsync())
+                        {
+                            if (reader.HasRows)
+                            {
+                                await reader.ReadAsync();
+                                jsonResult = reader.GetValue(0);
+                            }
+                            else
+                            {
+                                return Ok(new object[0]);
+                            }
+                        }
+
+                        Console.WriteLine($"Raw JSON result: {jsonResult}");
+
+                        if (jsonResult is string jsonString)
+                        {
+                            return Ok(JsonSerializer.Deserialize<object>(jsonString));
+                        }
+                        return Ok(jsonResult ?? new object[0]);
                     }
                 }
             }
@@ -153,6 +139,7 @@ namespace CloudWinksServiceAPI.Controllers
                 return StatusCode(500, ex.Message);
             }
         }
+
 
         private bool IsStoredProcedure(string name, NpgsqlConnection connection)
         {
@@ -230,19 +217,6 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.String && int.TryParse(jsonElement.GetString(), out int parsedInt)) return parsedInt;
                         throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to integer for value: {jsonElement}");
 
-                    case "bigint":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt64(out long longValue)) return longValue;
-                        if (jsonElement.ValueKind == JsonValueKind.String && long.TryParse(jsonElement.GetString(), out long parsedLong)) return parsedLong;
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bigint for value: {jsonElement}");
-
-                    case "numeric":
-                    case "decimal":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetDecimal(out decimal decValue)) return decValue;
-                        if (jsonElement.ValueKind == JsonValueKind.String && decimal.TryParse(jsonElement.GetString(), out decimal parsedDec)) return parsedDec;
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to numeric/decimal for value: {jsonElement}");
-
                     case "text":
                     case "varchar":
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
@@ -269,84 +243,9 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.String)
                         {
                             string? base64 = jsonElement.GetString();
-                            if (string.IsNullOrEmpty(base64)) return null;
-                            try
-                            {
-                                return Convert.FromBase64String(base64);
-                            }
-                            catch (FormatException ex)
-                            {
-                                throw new InvalidOperationException($"Invalid base64 string for bytea: {base64}", ex);
-                            }
+                            return string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
                         }
                         throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to bytea for value: {jsonElement}");
-
-                    case "timestamp with time zone":
-                    case "timestamptz":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String)
-                        {
-                            string? timestamp = jsonElement.GetString();
-                            if (string.IsNullOrEmpty(timestamp)) return null;
-                            if (DateTime.TryParse(timestamp, out DateTime dt))
-                            {
-                                return dt;
-                            }
-                            throw new InvalidOperationException($"Cannot parse {timestamp} as timestamp with time zone");
-                        }
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to timestamptz for value: {jsonElement}");
-
-                    case "timestamp":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String)
-                        {
-                            string? timestamp = jsonElement.GetString();
-                            if (string.IsNullOrEmpty(timestamp)) return null;
-                            if (DateTime.TryParse(timestamp, out DateTime dt))
-                            {
-                                return dt;
-                            }
-                            throw new InvalidOperationException($"Cannot parse {timestamp} as timestamp");
-                        }
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to timestamp for value: {jsonElement}");
-
-                    case "date":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String)
-                        {
-                            string? dateStr = jsonElement.GetString();
-                            if (string.IsNullOrEmpty(dateStr)) return null;
-                            if (DateTime.TryParse(dateStr, out DateTime dt))
-                            {
-                                return dt.Date;
-                            }
-                            throw new InvalidOperationException($"Cannot parse {dateStr} as date");
-                        }
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to date for value: {jsonElement}");
-
-                    case "json":
-                    case "jsonb":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String)
-                        {
-                            string? jsonStr = jsonElement.GetString();
-                            return jsonStr; // Return as string, PostgreSQL will handle parsing
-                        }
-                        return JsonSerializer.Serialize(jsonElement); // Convert entire element to JSON string
-
-                    case "uuid":
-                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
-                        if (jsonElement.ValueKind == JsonValueKind.String)
-                        {
-                            string? uuidStr = jsonElement.GetString();
-                            if (string.IsNullOrEmpty(uuidStr)) return null;
-                            if (Guid.TryParse(uuidStr, out Guid guid))
-                            {
-                                return guid;
-                            }
-                            throw new InvalidOperationException($"Cannot parse {uuidStr} as UUID");
-                        }
-                        throw new InvalidOperationException($"Cannot convert {jsonElement.ValueKind} to uuid for value: {jsonElement}");
 
                     default:
                         throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");

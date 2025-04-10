@@ -50,54 +50,70 @@ namespace CloudWinksServiceAPI.Controllers
                     {
                         if (isStoredProcedure)
                         {
-                            if (connection is NpgsqlConnection)
+                            // For PostgreSQL functions
+                            command.CommandType = CommandType.Text;
+
+                            // Sort parameters by sequence if needed
+                            var orderedParams = request.Parameters.ToList();
+
+                            var paramPlaceholders = new List<string>();
+                            for (int i = 0; i < orderedParams.Count; i++)
                             {
-                                // PostgreSQL: Use SELECT to call stored function
-                                var paramPlaceholders = new List<string>();
-                                for (int i = 0; i < request.Parameters.Count; i++)
-                                {
-                                    paramPlaceholders.Add($"${i + 1}");
-                                }
-
-                                string paramList = string.Join(", ", paramPlaceholders);
-                                command.CommandText = $"SELECT dbo.\"{request.Name}\"({paramList})";
-                                command.CommandType = CommandType.Text;
-
-                                for (int i = 0; i < request.Parameters.Count; i++)
-                                {
-                                    var param = request.Parameters[i];
-                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
-
-                                    var npgParam = new NpgsqlParameter
-                                    {
-                                        Value = paramValue ?? DBNull.Value
-                                    };
-
-                                    SetNpgsqlDbType(npgParam, param.Type);
-                                    command.Parameters.Add(npgParam);
-
-                                    Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
-                                }
+                                paramPlaceholders.Add($"${i + 1}");
                             }
-                            else
+
+                            string paramList = string.Join(", ", paramPlaceholders);
+
+                            // The key change: Use proper SQL syntax for function calls
+                            command.CommandText = $"SELECT * FROM dbo.\"{request.Name}\"({paramList})";
+
+                            // Add parameters
+                            for (int i = 0; i < orderedParams.Count; i++)
                             {
-                                // MSSQL-style stored procedure
-                                command.CommandType = CommandType.StoredProcedure;
-                                command.CommandText = $"dbo.{request.Name}";
+                                var param = orderedParams[i];
+                                var paramValue = ConvertJsonElement(param.Value, param.Type);
 
-                                for (int i = 0; i < request.Parameters.Count; i++)
+                                var npgParam = new NpgsqlParameter();
+                                npgParam.Value = paramValue ?? DBNull.Value;
+                                SetNpgsqlDbType(npgParam, param.Type);
+                                command.Parameters.Add(npgParam);
+
+                                Console.WriteLine($"Parameter {i + 1}: Name={param.Name}, Type={param.Type}, Value={paramValue}");
+                            }
+
+                            // Process results for functions that may return multiple rows
+                            using (var reader = await command.ExecuteReaderAsync())
+                            {
+                                if (reader.HasRows)
                                 {
-                                    var param = request.Parameters[i];
-                                    var paramValue = ConvertJsonElement(param.Value, param.Type);
-
-                                    var dbParam = new NpgsqlParameter
+                                    var resultList = new List<object>();
+                                    while (await reader.ReadAsync())
                                     {
-                                        ParameterName = $"p{i + 1}",
-                                        Value = paramValue ?? DBNull.Value
-                                    };
-
-                                    SetNpgsqlDbType(dbParam, param.Type);
-                                    command.Parameters.Add(dbParam);
+                                        // Check if first column is JSON
+                                        if (reader.GetFieldType(0) == typeof(string) && reader.GetString(0).StartsWith("{"))
+                                        {
+                                            // Direct JSON return
+                                            return Ok(JsonSerializer.Deserialize<object>(reader.GetString(0)));
+                                        }
+                                        else
+                                        {
+                                            // Create a dictionary for this row
+                                            var rowDict = new Dictionary<string, object>();
+                                            for (int i = 0; i < reader.FieldCount; i++)
+                                            {
+                                                if (!reader.IsDBNull(i))
+                                                {
+                                                    rowDict[reader.GetName(i)] = reader.GetValue(i);
+                                                }
+                                            }
+                                            resultList.Add(rowDict);
+                                        }
+                                    }
+                                    return Ok(resultList);
+                                }
+                                else
+                                {
+                                    return Ok(new object[0]);
                                 }
                             }
                         }
@@ -105,30 +121,28 @@ namespace CloudWinksServiceAPI.Controllers
                         {
                             command.CommandText = $"SELECT * FROM {request.Name}";
                             command.CommandType = CommandType.Text;
-                        }
 
-                        object jsonResult;
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            if (reader.HasRows)
+                            object jsonResult;
+                            using (var reader = await command.ExecuteReaderAsync())
                             {
-                                await reader.ReadAsync();
-                                jsonResult = reader.GetValue(0);
+                                if (reader.HasRows)
+                                {
+                                    await reader.ReadAsync();
+                                    jsonResult = reader.GetValue(0);
+                                }
+                                else
+                                {
+                                    return Ok(new object[0]);
+                                }
                             }
-                            else
+
+                            Console.WriteLine($"Raw JSON result: {jsonResult}");
+                            if (jsonResult is string jsonString)
                             {
-                                return Ok(new object[0]);
+                                return Ok(JsonSerializer.Deserialize<object>(jsonString));
                             }
+                            return Ok(jsonResult ?? new object[0]);
                         }
-
-                        Console.WriteLine($"Raw JSON result: {jsonResult}");
-
-                        if (jsonResult is string jsonString)
-                        {
-                            return Ok(JsonSerializer.Deserialize<object>(jsonString));
-                        }
-                        return Ok(jsonResult ?? new object[0]);
                     }
                 }
             }
@@ -139,7 +153,6 @@ namespace CloudWinksServiceAPI.Controllers
                 return StatusCode(500, ex.Message);
             }
         }
-
 
         private bool IsStoredProcedure(string name, NpgsqlConnection connection)
         {

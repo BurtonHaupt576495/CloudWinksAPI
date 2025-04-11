@@ -144,14 +144,14 @@ namespace CloudWinksServiceAPI.Controllers
                 return result != null && (long)result > 0;
             }
         }
-
         private void SetNpgsqlDbType(NpgsqlParameter parameter, string postgresType)
         {
             switch (postgresType.ToLower())
             {
                 case "integer":
                 case "int": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer; break;
-                case "smallint": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint; break;
+                case "smallint":
+                case "int2": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint; break;
                 case "bigint": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint; break;
                 case "numeric": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Numeric; break;
                 case "real": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Real; break;
@@ -163,8 +163,10 @@ namespace CloudWinksServiceAPI.Controllers
                 case "varchar": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Varchar; break;
                 case "char": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Char; break;
                 case "timestamp": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp; break;
-                case "timestamp with time zone": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz; break;
+                case "timestamp with time zone":
+                case "timestamptz": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz; break;
                 case "date": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date; break;
+                case "time": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Time; break;
                 case "uuid": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Uuid; break;
                 case "json": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Json; break;
                 case "jsonb": parameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb; break;
@@ -172,6 +174,7 @@ namespace CloudWinksServiceAPI.Controllers
                 default: break; // Let Npgsql infer
             }
         }
+
 
         private object? ConvertJsonElement(object? value, string? postgresType)
         {
@@ -201,9 +204,11 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt32(out int intValue)) return intValue;
                         if (jsonElement.ValueKind == JsonValueKind.String && int.TryParse(jsonElement.GetString(), out int parsedInt)) return parsedInt;
                         throw new InvalidOperationException($"Cannot convert to integer: {jsonElement}");
+
                     case "text":
                     case "varchar":
                         return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetString();
+
                     case "boolean":
                     case "bool":
                         return jsonElement.ValueKind switch
@@ -214,22 +219,66 @@ namespace CloudWinksServiceAPI.Controllers
                             JsonValueKind.Null => null,
                             _ => throw new InvalidOperationException()
                         };
+
                     case "double precision":
                     case "float":
                         return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDouble();
+
+                    case "timestamp":
+                    case "timestamptz":
+                    case "timestamp with time zone":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.String && DateTime.TryParse(jsonElement.GetString(), out var dt))
+                            return DateTime.SpecifyKind(dt.ToUniversalTime(), DateTimeKind.Utc);
+                        throw new InvalidOperationException($"Invalid datetime string: {jsonElement.GetString()}");
+
+                    case "int16":
+                    case "smallint":
+                    case "int2":
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
+                        if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt16(out var shortValue))
+                            return shortValue;
+                        throw new InvalidOperationException($"Invalid smallint value: {jsonElement}");
+
+                    case "date":
+                        return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDateTime().Date;
+
+                    case "time":
+                        return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDateTime().TimeOfDay;
+
                     case "bytea":
+                        if (jsonElement.ValueKind == JsonValueKind.Null)
+                            return null;
+
                         if (jsonElement.ValueKind == JsonValueKind.String)
                         {
                             string? base64 = jsonElement.GetString();
-                            return string.IsNullOrEmpty(base64) ? null : Convert.FromBase64String(base64);
+
+                            if (string.IsNullOrWhiteSpace(base64))
+                                return null;
+
+                            try
+                            {
+                                return Convert.FromBase64String(base64);
+                            }
+                            catch (FormatException)
+                            {
+                                Console.WriteLine($"⚠️ Invalid Base64 string received for bytea field: {base64}");
+                                return null;
+                            }
                         }
-                        throw new InvalidOperationException("Cannot convert to bytea");
+
+                        return null;
+
                     default:
-                        return jsonElement.ToString();
+                        throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");
                 }
             }
+
             return value;
         }
+        // closes ConvertJsonElement
+
 
         public class ParameterInfo
         {

@@ -144,6 +144,7 @@ namespace CloudWinksServiceAPI.Controllers
                 return result != null && (long)result > 0;
             }
         }
+
         private void SetNpgsqlDbType(NpgsqlParameter parameter, string postgresType)
         {
             switch (postgresType.ToLower())
@@ -175,7 +176,6 @@ namespace CloudWinksServiceAPI.Controllers
             }
         }
 
-
         private object? ConvertJsonElement(object? value, string? postgresType)
         {
             if (value is JsonElement jsonElement)
@@ -203,7 +203,7 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt32(out int intValue)) return intValue;
                         if (jsonElement.ValueKind == JsonValueKind.String && int.TryParse(jsonElement.GetString(), out int parsedInt)) return parsedInt;
-                        throw new InvalidOperationException($"Cannot convert to integer: {jsonElement}");
+                        return null; // Fallback instead of exception
 
                     case "text":
                     case "varchar":
@@ -215,9 +215,9 @@ namespace CloudWinksServiceAPI.Controllers
                         {
                             JsonValueKind.True => true,
                             JsonValueKind.False => false,
-                            JsonValueKind.String => bool.TryParse(jsonElement.GetString(), out bool b) ? b : throw new InvalidOperationException(),
+                            JsonValueKind.String => bool.TryParse(jsonElement.GetString(), out bool b) ? b : null,
                             JsonValueKind.Null => null,
-                            _ => throw new InvalidOperationException()
+                            _ => null
                         };
 
                     case "double precision":
@@ -230,15 +230,14 @@ namespace CloudWinksServiceAPI.Controllers
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.String && DateTime.TryParse(jsonElement.GetString(), out var dt))
                             return DateTime.SpecifyKind(dt.ToUniversalTime(), DateTimeKind.Utc);
-                        throw new InvalidOperationException($"Invalid datetime string: {jsonElement.GetString()}");
+                        return null;
 
-                    case "int16":
                     case "smallint":
                     case "int2":
                         if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.Number && jsonElement.TryGetInt16(out var shortValue))
                             return shortValue;
-                        throw new InvalidOperationException($"Invalid smallint value: {jsonElement}");
+                        return null;
 
                     case "date":
                         return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDateTime().Date;
@@ -247,16 +246,11 @@ namespace CloudWinksServiceAPI.Controllers
                         return jsonElement.ValueKind == JsonValueKind.Null ? null : jsonElement.GetDateTime().TimeOfDay;
 
                     case "bytea":
-                        if (jsonElement.ValueKind == JsonValueKind.Null)
-                            return null;
-
+                        if (jsonElement.ValueKind == JsonValueKind.Null) return null;
                         if (jsonElement.ValueKind == JsonValueKind.String)
                         {
                             string? base64 = jsonElement.GetString();
-
-                            if (string.IsNullOrWhiteSpace(base64))
-                                return null;
-
+                            if (string.IsNullOrWhiteSpace(base64)) return null;
                             try
                             {
                                 return Convert.FromBase64String(base64);
@@ -267,18 +261,24 @@ namespace CloudWinksServiceAPI.Controllers
                                 return null;
                             }
                         }
-
                         return null;
 
                     default:
-                        throw new NotSupportedException($"Unsupported PostgreSQL type: {postgresType}");
+                        return null; // Fallback instead of exception
                 }
             }
 
-            return value;
+            // Handle deserialized values (e.g., int from ASP.NET Core)
+            switch (postgresType?.ToLower())
+            {
+                case "smallint":
+                case "int2":
+                    if (value is int intValue && intValue >= -32768 && intValue <= 32767) return (short)intValue;
+                    return value; // Fallback to original value if out of range
+                default:
+                    return value; // Return as-is for other types
+            }
         }
-        // closes ConvertJsonElement
-
 
         public class ParameterInfo
         {
